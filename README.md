@@ -13,7 +13,7 @@ correctness or scale requirement, and is explained rather than asserted.
 
 ## Table of Contents
 
-- [Architecture](#architecture)
+- [System Design](#system-design)
 - [Key Design Decisions](#key-design-decisions)
 - [Features](#features)
 - [Database Design](#database-design)
@@ -30,46 +30,121 @@ correctness or scale requirement, and is explained rather than asserted.
 
 ---
 
-## Architecture
+## System Design
 
+The diagram below is rendered natively by GitHub (Mermaid) — no external tool or image
+export required to view it.
+
+```mermaid
+flowchart TB
+    subgraph Client["Client Layer"]
+        SDK["API Clients / Swagger UI"]
+    end
+
+    subgraph Edge["Edge"]
+        ING["Ingress — nginx + TLS (cert-manager)"]:::infra
+    end
+
+    subgraph App["WalletSys Service — Spring Boot 3 / Java 21"]
+        direction TB
+        RL["RateLimitFilter\nbucket4j token bucket (Redis-backed)"]:::filter
+        JWT["JwtAuthenticationFilter\nstateless JWT verification"]:::filter
+        CTRL["Controllers\nAuthController · WalletController\nTransactionController · RefundController"]:::layer
+        SVC["Service Layer\nUserService · WalletService\nTransferService · RefundService"]:::layer
+        EXEC["TransferAttemptExecutor / RefundAttemptExecutor\n@Retryable + @Transactional\noptimistic-lock retry loop"]:::core
+        LEDGER["LedgerService\nappend-only double-entry writer"]:::core
+        IDEM["IdempotencyService\nreserve / replay / conflict"]:::core
+        REPO["Spring Data JPA Repositories"]:::layer
+
+        RL --> JWT --> CTRL --> SVC
+        SVC --> IDEM
+        SVC --> EXEC --> LEDGER --> REPO
+    end
+
+    subgraph Async["Event Backbone"]
+        OUTBOX["OutboxPoller\nscheduled, 500ms\nreads outbox_events"]:::core
+        PUB["EventPublisher"]:::core
+        KAFKA["Apache Kafka (KRaft)\nwallet.created · money.transferred\nmoney.credited · money.debited\nrefund.completed  (+ .DLQ per topic)"]:::infra
+        CONSUMER["NotificationConsumer\nidempotent · manual ack · DLQ on failure"]:::core
+        NOTIFY["NotificationService\n(SES / Twilio / FCM in production)"]:::infra
+    end
+
+    subgraph Data["Data Layer"]
+        PG[("PostgreSQL 16\nwallets · ledger_entries · transactions\nidempotency_keys · outbox_events")]:::datastore
+        REDIS[("Redis 7\nwallet:balance:* · user:session:*\nrate-limit buckets · notif:seen-event:*")]:::datastore
+    end
+
+    subgraph Observability["Observability"]
+        PROM["Prometheus"]:::infra
+        GRAF["Grafana"]:::infra
+    end
+
+    SDK -->|HTTPS| ING --> RL
+    REPO --> PG
+    OUTBOX --> PG
+    OUTBOX --> PUB --> KAFKA --> CONSUMER --> NOTIFY
+    SVC -.cache-aside.-> REDIS
+    JWT -.session cache.-> REDIS
+    RL -.token buckets.-> REDIS
+    CONSUMER -.dedup.-> REDIS
+    App -.scrape /actuator/prometheus.-> PROM --> GRAF
+
+    classDef infra fill:#1f2937,color:#fff,stroke:#374151
+    classDef filter fill:#7c3aed,color:#fff,stroke:#5b21b6
+    classDef layer fill:#2563eb,color:#fff,stroke:#1e40af
+    classDef core fill:#0891b2,color:#fff,stroke:#0e7490
+    classDef datastore fill:#059669,color:#fff,stroke:#047857
 ```
-                                   ┌─────────────────┐
-                                   │   Swagger UI /   │
-                                   │   API Clients     │
-                                   └────────┬─────────┘
-                                            │ HTTPS
-                              ┌─────────────▼──────────────┐
-                              │   Ingress (nginx + TLS)     │  ← k8s only
-                              └─────────────┬──────────────┘
-                                            │
-   ┌────────────────────────────────────────▼─────────────────────────────────────────┐
-   │                              WalletSys Application (Spring Boot)                  │
-   │                                                                                    │
-   │  RateLimitFilter → JwtAuthenticationFilter → Controllers → Services → Repositories │
-   │        (bucket4j/Redis)      (JWT verify)      (thin)    (business logic)  (JPA)   │
-   │                                                                                    │
-   │   ┌──────────────────────────────┐        ┌───────────────────────────────────┐   │
-   │   │ TransferAttemptExecutor       │        │ OutboxPoller (scheduled, 500ms)   │   │
-   │   │ RefundAttemptExecutor         │        │  reads outbox_events → publishes  │   │
-   │   │  @Retryable + @Transactional  │        │  to Kafka → marks PUBLISHED/FAILED│   │
-   │   └──────────────┬────────────────┘        └────────────────┬──────────────────┘   │
-   └──────────────────┼──────────────────────────────────────────┼──────────────────────┘
-                      │                                          │
-        ┌─────────────▼─────────────┐                 ┌──────────▼──────────┐
-        │        PostgreSQL          │                 │        Kafka         │
-        │  (ledger, wallets, txns,   │                 │  wallet.created       │
-        │   idempotency_keys,        │                 │  money.transferred    │
-        │   outbox_events)           │                 │  money.credited/debited│
-        └─────────────────────────────┘                 │  refund.completed      │
-                      ▲                                  │  + .DLQ per topic      │
-                      │                                  └──────────┬────────────┘
-        ┌─────────────┴─────────────┐                              │
-        │           Redis            │                  ┌──────────▼─────────────┐
-        │  wallet:balance:*  (cache) │                  │  NotificationConsumer   │
-        │  user:session:*   (cache)  │                  │  (idempotent, manual    │
-        │  rate-limit buckets        │                  │   ack, DLQ on failure)  │
-        │  notif:seen-event:* (dedup)│                  └─────────────────────────┘
-        └─────────────────────────────┘
+
+### Request Sequence — Wallet-to-Wallet Transfer
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant F as RateLimitFilter / JwtAuthenticationFilter
+    participant TC as TransactionController
+    participant TS as TransferServiceImpl
+    participant IS as IdempotencyService
+    participant TE as TransferAttemptExecutor
+    participant LS as LedgerService
+    participant DB as PostgreSQL
+    participant OB as OutboxPoller
+    participant K as Kafka
+    participant NC as NotificationConsumer
+
+    C->>F: POST /transactions/transfer (JWT, Idempotency-Key)
+    F->>TC: authenticated, rate-limit OK
+    TC->>TS: transfer(request, idempotencyKey)
+    TS->>IS: reserve(idempotencyKey)
+    alt key already completed
+        IS-->>TS: cached response
+        TS-->>C: 201 (replayed, not re-executed)
+    else first attempt
+        IS-->>TS: FIRST_ATTEMPT
+        TS->>TE: doTransfer(request)
+        activate TE
+        TE->>LS: debit(sourceWallet)
+        LS->>DB: UPDATE wallets ... WHERE version = ?
+        alt version conflict / deadlock
+            DB-->>LS: ConcurrencyFailureException
+            LS-->>TE: retry (exponential backoff, up to 30x)
+        else success
+            LS->>DB: INSERT ledger_entries (DEBIT)
+            TE->>LS: credit(destinationWallet)
+            LS->>DB: UPDATE wallets + INSERT ledger_entries (CREDIT)
+            TE->>DB: INSERT outbox_events (MoneyTransferred)
+            TE->>DB: COMMIT
+        end
+        deactivate TE
+        TS->>IS: complete(idempotencyKey, response)
+        TS-->>C: 201 Created
+    end
+    OB->>DB: SELECT ... WHERE status = 'PENDING'
+    OB->>K: publish MoneyTransferred
+    K->>NC: consume
+    NC->>NC: dedup check (Redis SETNX on eventId)
+    NC-->>K: manual ack
 ```
 
 **Request flow for a transfer:**
@@ -341,21 +416,43 @@ Full schema with inline rationale comments: [`src/main/resources/db/migration/V1
 
 ## Tech Stack
 
-| Concern | Choice |
+| Layer | Technology | Purpose |
+|---|---|---|
+| Language & Runtime | **Java 21** (LTS) | Records, pattern matching, virtual-thread-ready runtime |
+| Application Framework | **Spring Boot 3.3** | Auto-configuration, embedded Tomcat, production-ready defaults |
+| Web Layer | **Spring MVC** | REST controllers, servlet-based request handling |
+| Security | **Spring Security 6**, **JJWT (io.jsonwebtoken)**, **BCrypt** | Stateless JWT auth, filter chain, password hashing |
+| Persistence | **Spring Data JPA / Hibernate** | Entity-repository mapping, optimistic locking (`@Version`) |
+| Relational Database | **PostgreSQL 16** | System of record — ledger, wallets, transactions |
+| Schema Migration | **Flyway** | Versioned, auditable schema changes |
+| Object Mapping | **MapStruct** | Compile-time-generated entity ↔ DTO mappers (zero reflection overhead) |
+| Caching | **Redis 7** (Spring Data Redis + dedicated **Jedis** pool) | Wallet balance cache, session cache, rate-limit buckets |
+| Rate Limiting | **Bucket4j** | Distributed token-bucket algorithm backed by Redis |
+| Messaging / Event Streaming | **Apache Kafka** (KRaft mode) | Domain event bus — wallet/transaction/refund events |
+| Resilience | **Spring Retry** | Exponential-backoff retry on optimistic-lock/deadlock contention |
+| API Documentation | **springdoc-openapi** (OpenAPI 3 / Swagger UI) | Interactive, auth-aware API docs |
+| Build Tool | **Gradle** (wrapper committed) | Dependency management, multi-stage build orchestration |
+| Unit & Integration Testing | **JUnit 5**, **Mockito**, **AssertJ** | Business-logic and contract verification |
+| Test Infrastructure | **Testcontainers**, **Awaitility** | Disposable, real Postgres/Kafka/Redis instances for integration tests |
+| Containerization | **Docker** (multi-stage build), **Docker Compose** | Reproducible local/dev environment |
+| Container Orchestration | **Kubernetes** (Kustomize) | Deployment, HPA, PDB, Ingress manifests |
+| CI/CD | **GitHub Actions** | Build, test, and image publish pipeline |
+| Metrics & Dashboards | **Micrometer → Prometheus → Grafana** | Application + JVM + infra observability |
+| Logging | **SLF4J + Logback** | Structured, trace-ID–tagged console and rolling-file logs |
+
+### Tools & Developer Workflow
+
+| Category | Tool |
 |---|---|
-| Language / Runtime | Java 21, Spring Boot 3.3 |
-| Database | PostgreSQL 16, Flyway migrations |
-| Caching | Redis 7 (Spring Data Redis + a dedicated Jedis pool for rate limiting) |
-| Messaging | Apache Kafka (KRaft mode, no Zookeeper) |
-| Auth | Spring Security, JJWT, BCrypt |
-| Rate limiting | bucket4j |
-| API docs | springdoc-openapi / Swagger UI |
-| Build | Gradle (wrapper committed) |
-| Testing | JUnit 5, Mockito, AssertJ, Testcontainers, Awaitility |
-| Containers | Docker (multi-stage build), Docker Compose |
-| Orchestration | Kubernetes manifests (kustomize) |
-| CI/CD | GitHub Actions |
-| Observability | Micrometer → Prometheus, Grafana |
+| IDE-agnostic build | Gradle Wrapper (`./gradlew`) — no local Gradle install required |
+| API exploration | Swagger UI (`/swagger-ui/index.html`), Postman-compatible OpenAPI export |
+| Local infra bootstrap | Docker Compose / Podman Compose |
+| Container runtime (dev-verified) | Docker Engine or Podman (rootless-compatible) |
+| Database inspection | `psql` / any PostgreSQL client (DBeaver, TablePlus) |
+| Cache inspection | `redis-cli` |
+| Kafka inspection | `kafka-console-consumer`, Kafdrop (optional) |
+| Load/traffic simulation (planned) | k6 / Gatling — see [Future Improvements](#future-improvements) |
+| Version control | Git, GitHub (Actions for CI/CD, Container Registry for images) |
 
 ---
 
