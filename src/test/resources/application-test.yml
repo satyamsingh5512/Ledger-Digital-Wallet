@@ -1,0 +1,31 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  flyway:
+    enabled: true
+  kafka:
+    consumer:
+      auto-offset-reset: earliest
+  datasource:
+    hikari:
+      maximum-pool-size: 30
+
+app:
+  jwt:
+    secret: test-secret-key-for-jwt-signing-minimum-256-bits-long-please-ok
+    access-token-expiration-ms: 900000
+    refresh-token-expiration-ms: 604800000
+    issuer: walletsys-test
+  rate-limit:
+    enabled: false
+  outbox:
+    poll-interval-ms: 2000
+    batch-size: 50
+    max-retries: 5
+
+logging:
+  level:
+    com.walletsys: DEBUG
+    org.testcontainers: INFO

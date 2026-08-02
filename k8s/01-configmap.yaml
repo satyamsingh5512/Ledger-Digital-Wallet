@@ -1,0 +1,19 @@
+# Non-secret application configuration. Values here map to environment variables
+# consumed by application.yml (see src/main/resources/application.yml `${VAR:default}`
+# placeholders) — no code changes are needed to pick these up.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: walletsys-config
+  namespace: walletsys
+data:
+  SPRING_PROFILES_ACTIVE: "docker"
+  DB_URL: "jdbc:postgresql://postgres:5432/walletsys"
+  DB_USERNAME: "walletsys"
+  DB_POOL_SIZE: "20"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+  SERVER_PORT: "8080"
+  JWT_ACCESS_EXPIRATION_MS: "900000"
+  JWT_REFRESH_EXPIRATION_MS: "604800000"

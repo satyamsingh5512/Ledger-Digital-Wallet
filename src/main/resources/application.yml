@@ -1,0 +1,142 @@
+spring:
+  application:
+    name: walletsys
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/walletsys}
+    username: ${DB_USERNAME:walletsys}
+    password: ${DB_PASSWORD:walletsys}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+      minimum-idle: 5
+      idle-timeout: 30000
+      connection-timeout: 30000
+      pool-name: WalletSysHikariPool
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc.batch_size: 50
+        order_inserts: true
+        order_updates: true
+        format_sql: false
+        generate_statistics: false
+    show-sql: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      connect-timeout: 2000ms
+
+  cache:
+    type: redis
+    redis:
+      time-to-live: 300000 # 5 minutes default TTL for wallet balance cache
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 5
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        linger.ms: 10
+        delivery.timeout.ms: 30000
+    consumer:
+      group-id: walletsys-notification-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      properties:
+        spring.json.trusted.packages: com.walletsys.kafka.event
+        isolation.level: read_committed
+    listener:
+      ack-mode: MANUAL_IMMEDIATE
+      concurrency: 3
+
+  security:
+    filter:
+      order: 10
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  error:
+    include-message: always
+    include-binding-errors: always
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+logging:
+  level:
+    root: INFO
+    com.walletsys: INFO
+    org.hibernate.SQL: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [traceId=%X{traceId:-}] - %msg%n"
+
+app:
+  jwt:
+    secret: ${JWT_SECRET:change-this-secret-in-production-minimum-256-bits-long-please}
+    access-token-expiration-ms: ${JWT_ACCESS_EXPIRATION_MS:900000}      # 15 minutes
+    refresh-token-expiration-ms: ${JWT_REFRESH_EXPIRATION_MS:604800000} # 7 days
+    issuer: walletsys
+  ledger:
+    supported-currencies: INR,USD,EUR
+    default-currency: INR
+  idempotency:
+    ttl-hours: 24
+  rate-limit:
+    enabled: true
+    capacity: 100
+    refill-tokens: 100
+    refill-duration-seconds: 60
+  outbox:
+    poll-interval-ms: 500
+    batch-size: 100
+    max-retries: 5
+  kafka:
+    topics:
+      wallet-created: wallet.created
+      money-transferred: money.transferred
+      money-credited: money.credited
+      money-debited: money.debited
+      refund-completed: refund.completed
+      dlq-suffix: .DLQ

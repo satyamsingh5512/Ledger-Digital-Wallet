@@ -1,0 +1,32 @@
+# Requires an ingress controller (e.g. ingress-nginx) already installed in the cluster,
+# and cert-manager if TLS via Let's Encrypt is desired (annotations below assume both).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: walletsys-ingress
+  namespace: walletsys
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+    # Rate limiting also exists at the ingress layer as defense-in-depth, in addition
+    # to the application's own bucket4j-based limiter (config/RateLimitFilter) — this
+    # protects against volumetric abuse before it even reaches a pod.
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.walletsys.example.com
+      secretName: walletsys-tls
+  rules:
+    - host: api.walletsys.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: walletsys-app
+                port:
+                  number: 8080

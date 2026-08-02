@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: walletsys-app
+  namespace: walletsys
+  labels:
+    app: walletsys-app
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0   # never drop below the requested replica count during a rollout
+  selector:
+    matchLabels:
+      app: walletsys-app
+  template:
+    metadata:
+      labels:
+        app: walletsys-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8080"
+    spec:
+      # Spread replicas across nodes where possible — avoids all 3 pods landing on
+      # one node and becoming a single point of failure despite "3 replicas".
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: walletsys-app
+      containers:
+        - name: walletsys-app
+          image: ghcr.io/OWNER/WalletSys:latest   # replace OWNER/WalletSys with the real GHCR path
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: walletsys-config
+          env:
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: walletsys-secrets
+                  key: JWT_SECRET
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: walletsys-secrets
+                  key: DB_PASSWORD
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: walletsys-secrets
+                  key: REDIS_PASSWORD
+            - name: JAVA_OPTS
+              value: "-XX:MaxRAMPercentage=75.0 -XX:InitialRAMPercentage=50.0"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1024Mi"
+          # Distinguish liveness (is the process alive/deadlocked?) from readiness (can
+          # it currently serve traffic? — depends on DB/Redis/Kafka being reachable).
+          # Spring Boot Actuator's dedicated probe groups (already configured via
+          # management.endpoint.health.probes.enabled=true) back these two paths.
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Give in-flight requests time to complete before the pod is killed —
+          # matches server.shutdown=graceful already configured in application.yml.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+      terminationGracePeriodSeconds: 40

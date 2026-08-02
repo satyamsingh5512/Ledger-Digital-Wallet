@@ -1,0 +1,15 @@
+# Files/dirs excluded from the Docker build context — keeps the context small and
+# avoids invalidating build caches on unrelated changes (docs, IDE files, git history).
+.git
+.gitignore
+.gradle
+build
+out
+*.md
+.idea
+*.iml
+docker
+k8s
+.github
+logs
+docker-compose*.yml

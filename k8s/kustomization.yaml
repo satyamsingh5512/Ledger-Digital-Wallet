@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: walletsys
+
+resources:
+  - 00-namespace.yaml
+  - 01-configmap.yaml
+  - 02-secrets.yaml
+  - 10-app-deployment.yaml
+  - 11-app-service.yaml
+  - 12-app-hpa.yaml
+  - 13-app-pdb.yaml
+  - 14-app-ingress.yaml
+  # Comment out 20-dev-only-stateful-deps.yaml for any environment where Postgres/
+  # Redis/Kafka are provided by managed services (RDS/ElastiCache/MSK) instead of
+  # in-cluster StatefulSets — see that file's header comment.
+  - 20-dev-only-stateful-deps.yaml

@@ -1,0 +1,13 @@
+# Ensures at least 2 pods stay available during voluntary disruptions (node drains,
+# cluster upgrades) — prevents a rolling node upgrade from taking down all replicas
+# simultaneously even if the HPA has scaled down to the minimum.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: walletsys-app-pdb
+  namespace: walletsys
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: walletsys-app
